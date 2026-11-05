@@ -133,12 +133,27 @@ pub async fn account_import(
     cookie: String,
     alias: String,
 ) -> Result<Account> {
-    let result = save_new_account(&state, Secret::new(cookie), alias).await;
-    if result.is_err() {
+    // Only normalize the name and accidental edge whitespace. Never record the value.
+    let input = zeroize::Zeroizing::new(cookie);
+    let value = input.trim();
+    let value = value
+        .strip_prefix(".ROBLOSECURITY=")
+        .unwrap_or(value)
+        .trim();
+    let result =
+        if value.is_empty() || value.contains(';') || value.chars().any(char::is_whitespace) {
+            Err(Error::Invalid(
+                "Enter only the Roblox session cookie value.",
+            ))
+        } else {
+            save_new_account(&state, Secret::new(value.to_owned()), alias).await
+        };
+    if let Err(error) = &result {
+        // Error messages are explicitly sanitized by the Error type; no raw HTTP data.
         state
             .diagnostic(
                 "account_import",
-                "Validation failed. No credential was stored.",
+                &format!("Validation failed: {error} No credential was stored."),
             )
             .await;
     }

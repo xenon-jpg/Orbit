@@ -43,6 +43,19 @@ fn cookie_header(cookie: &Secret) -> Result<HeaderValue> {
     }
     HeaderValue::from_str(&format!(".ROBLOSECURITY={cookie}")).map_err(|_| Error::SessionExpired)
 }
+// Never log Set-Cookie headers. A newly validated account has no vault ID yet,
+// but its refreshed session must still be returned to the caller.
+fn rotated_session(headers: &HeaderMap) -> Option<Secret> {
+    headers
+        .get_all(SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .filter_map(|v| v.strip_prefix(".ROBLOSECURITY="))
+        .map(|v| v.split(';').next().unwrap_or_default())
+        .filter(|v| !v.is_empty() && v.len() <= 16_384 && !v.bytes().any(|b| b < 32 || b == 127))
+        .map(|v| Secret::new(v.to_owned()))
+        .last()
+}
 fn classify(status: StatusCode, body: &[u8]) -> Error {
     if status == StatusCode::UNAUTHORIZED {
         let v: Value = serde_json::from_slice(body).unwrap_or_default();
@@ -107,6 +120,7 @@ impl Roblox {
     ) -> Result<(Value, Option<Secret>)> {
         let url = checked_url(url)?;
         let mut effective_cookie = cookie.cloned();
+        let mut rotated_cookie = None;
         let mut csrf = match account {
             Some(id) => self.csrf.lock().await.get(id).cloned(),
             None => None,
@@ -137,24 +151,15 @@ impl Roblox {
             }
             let response = request.send().await?;
             let status = response.status();
-            let mut rotated_cookie = None;
-            // Persist rotation before acknowledging any successful API call.
-            if let Some(id) = account {
-                for value in response.headers().get_all(SET_COOKIE) {
-                    if let Ok(value) = value.to_str() {
-                        if let Some(rest) = value.strip_prefix(".ROBLOSECURITY=") {
-                            let rotated = rest.split(';').next().unwrap_or_default();
-                            if !rotated.is_empty()
-                                && rotated.len() <= 16_384
-                                && !rotated.bytes().any(|b| b < 32 || b == 127)
-                            {
-                                let secret = Secret::new(rotated.into());
-                                self.vault.replace_cookie(id, secret.clone()).await?;
-                                effective_cookie = Some(secret.clone());
-                                rotated_cookie = Some(secret);
-                            }
-                        }
+            // Retain rotations even while validating a new account, before it
+            // has an ID. For saved accounts, persist the rotation immediately.
+            if effective_cookie.is_some() {
+                if let Some(secret) = rotated_session(response.headers()) {
+                    if let Some(id) = account {
+                        self.vault.replace_cookie(id, secret.clone()).await?;
                     }
+                    effective_cookie = Some(secret.clone());
+                    rotated_cookie = Some(secret);
                 }
             }
             let next_csrf = response
@@ -677,6 +682,28 @@ mod tests {
             classify(StatusCode::UNAUTHORIZED, b"{}"),
             Error::SessionExpired
         ));
+    }
+    #[test]
+    fn extracts_rotated_cookie_without_disclosing_it() {
+        let mut headers = HeaderMap::new();
+        headers.append(SET_COOKIE, HeaderValue::from_static("other=value; Path=/"));
+        assert!(rotated_session(&headers).is_none());
+        headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static(".ROBLOSECURITY=test-value; Path=/; HttpOnly"),
+        );
+        let rotated = rotated_session(&headers).unwrap();
+        assert_eq!(rotated.expose(), "test-value");
+        assert!(!format!("{rotated:?}").contains("test-value"));
+    }
+    #[test]
+    fn ignores_empty_cookie_rotation() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            SET_COOKIE,
+            HeaderValue::from_static(".ROBLOSECURITY=; Path=/"),
+        );
+        assert!(rotated_session(&headers).is_none());
     }
     #[test]
     fn webhook_host_is_exact() {
