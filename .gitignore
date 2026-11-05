@@ -1,0 +1,16 @@
+node_modules/
+dist/
+src-tauri/target/
+.env
+.env.*
+!.env.example
+*.log
+*.vault
+*.local
+playwright-report/
+test-results/
+.DS_Store
+*.altdeck
+vault.json
+src-tauri/gen/
+artifacts/

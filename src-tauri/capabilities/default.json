@@ -1,0 +1,8 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-window",
+  "description": "IPC and native dialogs are restricted to the main application window.",
+  "windows": ["main"],
+  "remote": { "urls": [] },
+  "permissions": ["core:default", "dialog:default", { "identifier": "opener:allow-open-url", "allow": [{ "url": "https://www.roblox.com/download" }] }]
+}
