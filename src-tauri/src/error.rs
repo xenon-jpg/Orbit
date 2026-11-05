@@ -33,8 +33,10 @@ pub enum Error {
     WindowsRequired,
     #[error("Roblox is not installed in the current user's standard location.")]
     NotInstalled,
-    #[error("The Roblox executable signature or publisher could not be verified. Launch refused.")]
+    #[error("Windows verified the signature, but the Roblox signer could not be confirmed. Launch refused.")]
     UntrustedClient,
+    #[error("Windows could not verify the Roblox executable signature (WinTrust code 0x{0:08X}). Launch refused.")]
+    SignatureStatus(u32),
     #[error("Close existing Roblox windows before enabling multi-instance.")]
     ExistingClients,
     #[error("No suitable server has enough space for the whole batch.")]

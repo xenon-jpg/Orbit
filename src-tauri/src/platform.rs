@@ -226,10 +226,15 @@ pub mod win {
         Ok(canonical)
     }
 
+    /// Verify Authenticode and inspect the actual leaf signer from WinTrust's
+    /// verified chain, rather than an arbitrary certificate in the PKCS#7 store.
     pub fn verify_signature(path: &std::path::Path) -> Result<()> {
         use windows::core::PCWSTR;
-        use windows::Win32::Security::Cryptography::*;
+        use windows::Win32::Security::Cryptography::{
+            CertGetNameStringW, CERT_NAME_SIMPLE_DISPLAY_TYPE,
+        };
         use windows::Win32::Security::WinTrust::*;
+
         let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
         let mut file = WINTRUST_FILE_INFO {
             cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
@@ -253,6 +258,35 @@ pub mod win {
                 &mut data as *mut _ as *mut c_void,
             )
         };
+
+        let mut publisher_ok = false;
+        if status == 0 {
+            // The signer and certificate pointers belong to WinTrust state and are
+            // only valid until WTD_STATEACTION_CLOSE below.
+            unsafe {
+                let provider = WTHelperProvDataFromStateData(data.hWVTStateData);
+                if !provider.is_null() {
+                    let signer = WTHelperGetProvSignerFromChain(provider, 0, false, 0);
+                    if !signer.is_null() {
+                        let leaf = WTHelperGetProvCertFromChain(signer, 0);
+                        if !leaf.is_null() && !(*leaf).pCert.is_null() {
+                            let mut name = [0u16; 512];
+                            let len = CertGetNameStringW(
+                                (*leaf).pCert,
+                                CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                                0,
+                                None,
+                                Some(&mut name),
+                            );
+                            if len > 1 && (len as usize) <= name.len() {
+                                let publisher = String::from_utf16_lossy(&name[..len as usize - 1]);
+                                publisher_ok = publisher.eq_ignore_ascii_case("Roblox Corporation");
+                            }
+                        }
+                    }
+                }
+            }
+        }
         data.dwStateAction = WTD_STATEACTION_CLOSE;
         unsafe {
             let _ = WinVerifyTrust(
@@ -262,59 +296,9 @@ pub mod win {
             );
         }
         if status != 0 {
-            return Err(Error::UntrustedClient);
+            return Err(Error::SignatureStatus(status as u32));
         }
-        let mut store = HCERTSTORE::default();
-        unsafe {
-            CryptQueryObject(
-                CERT_QUERY_OBJECT_FILE,
-                wide.as_ptr().cast(),
-                CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED,
-                CERT_QUERY_FORMAT_FLAG_BINARY,
-                0,
-                None,
-                None,
-                None,
-                Some(&mut store),
-                None,
-                None,
-            )
-        }
-        .map_err(|_| Error::UntrustedClient)?;
-        let cert = unsafe {
-            CertFindCertificateInStore(
-                store,
-                CERT_QUERY_ENCODING_TYPE(0x00010001),
-                0,
-                CERT_FIND_ANY,
-                None,
-                None,
-            )
-        };
-        let mut name = [0u16; 512];
-        let len = if cert.is_null() {
-            0
-        } else {
-            unsafe {
-                CertGetNameStringW(
-                    cert,
-                    CERT_NAME_SIMPLE_DISPLAY_TYPE,
-                    0,
-                    None,
-                    Some(&mut name),
-                )
-            }
-        };
-        if !cert.is_null() {
-            unsafe {
-                let _ = CertFreeCertificateContext(Some(cert));
-            }
-        }
-        unsafe {
-            let _ = CertCloseStore(Some(store), 0);
-        }
-        let publisher = String::from_utf16_lossy(&name[..len.saturating_sub(1) as usize]);
-        if !publisher.eq_ignore_ascii_case("Roblox Corporation") {
+        if !publisher_ok {
             return Err(Error::UntrustedClient);
         }
         Ok(())
