@@ -82,7 +82,7 @@ pub fn hello_available() -> bool {
     };
     UserConsentVerifier::CheckAvailabilityAsync()
         .ok()
-        .and_then(|op| op.get().ok())
+        .and_then(|op| op.join().ok())
         .is_some_and(|v| v == UserConsentVerifierAvailability::Available)
 }
 #[cfg(windows)]
@@ -98,7 +98,7 @@ pub async fn verify_hello() -> Result<()> {
             "Verify your identity to reveal an AltDeck account session",
         ))
         .map_err(|_| Error::HelloRequired)?
-        .get()
+        .join()
         .map_err(|_| Error::HelloRequired)?;
         if result == UserConsentVerificationResult::Verified {
             Ok(())
