@@ -563,8 +563,7 @@ impl Manager {
                 .map(|c| (c.tracked.pid, c.tracked.created_at))
                 .collect();
             let unmanaged = system.processes().values().any(|p| {
-                p.name()
-                    .is_some_and(|n| n.eq_ignore_ascii_case("RobloxPlayerBeta.exe"))
+                p.name().eq_ignore_ascii_case("RobloxPlayerBeta.exe")
                     && !p
                         .cmd()
                         .iter()
@@ -765,7 +764,7 @@ impl Manager {
             if has_recovered {
                 if let Ok(mut singleton) = self.singleton.lock() {
                     if singleton.is_none() {
-                        *singleton = win::Singleton::acquire(true).ok();
+                        *singleton = crate::platform::win::Singleton::acquire(true).ok();
                     }
                 }
             }

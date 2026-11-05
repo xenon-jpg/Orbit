@@ -115,10 +115,17 @@ pub mod win {
     use super::*;
     use std::{ffi::c_void, os::windows::ffi::OsStrExt, path::PathBuf, sync::mpsc};
     use windows::{
-        core::*,
+        core::{w, BOOL},
         Win32::{
             Foundation::*,
-            System::{Diagnostics::ToolHelp::*, JobObjects::*, Threading::*},
+            Graphics::Gdi::{
+                GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+            },
+            Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS},
+            System::{
+                Diagnostics::ToolHelp::*, JobObjects::*, SystemInformation::GetTickCount,
+                Threading::*,
+            },
             UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
         },
     };
