@@ -13,7 +13,7 @@ function account(id: string): Account { const a = local().accounts.find(a => a.i
 export const api = {
   async status(): Promise<VaultStatus> {
     if (native) return invoke('vault_status');
-    return { exists: true, unlocked: true, mode: 'demo', hasRecovery: false, helloAvailable: false, platform: 'browser', version: '0.1.0' };
+    return { exists: true, unlocked: true, mode: 'demo', hasRecovery: false, helloAvailable: false, platform: 'browser', version: '0.2.1' };
   },
   async initialize(password?: string) { if (native) return invoke('vault_initialize', { password: password || null }); },
   async unlock(password: string) { if (native) return invoke('vault_unlock', { password }); },

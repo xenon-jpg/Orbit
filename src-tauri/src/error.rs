@@ -45,6 +45,10 @@ pub enum Error {
     ClientGone,
     #[error("The launch was cancelled.")]
     Cancelled,
+    #[error("Roblox launch failed at stage: {0}. No credentials were logged.")]
+    LaunchStage(&'static str),
+    #[error("Roblox launch failed at stage: {0} (OS code 0x{1:08X}). No credentials were logged.")]
+    LaunchSystem(&'static str, u32),
     #[error("The operation could not be completed. See diagnostics for a redacted error code.")]
     Internal,
 }

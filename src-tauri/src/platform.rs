@@ -1,6 +1,12 @@
 use crate::error::{Error, Result};
 use zeroize::Zeroizing;
 
+// A freshly created job object has no CPU rate control enabled.
+#[cfg(any(windows, test))]
+fn initial_cpu_cap_requested(percent: u32) -> bool {
+    percent > 0
+}
+
 #[cfg(not(windows))]
 pub fn protect(_data: &[u8]) -> Result<Vec<u8>> {
     Err(Error::DpapiUnavailable)
@@ -305,7 +311,7 @@ pub mod win {
     }
 
     pub fn spawn_client(uri: &str, cpu_percent: u32) -> Result<(u32, Handle)> {
-        use std::os::windows::io::AsRawHandle;
+        use std::os::windows::io::IntoRawHandle;
         use std::os::windows::process::CommandExt;
         let exe = roblox_path()?;
         // raw_arg receives our encoded URI, never a user-provided shell command.
@@ -313,9 +319,12 @@ pub mod win {
             .raw_arg(format!("\"{uri}\""))
             .current_dir(exe.parent().ok_or(Error::NotInstalled)?)
             .creation_flags(CREATE_SUSPENDED.0 | CREATE_NEW_PROCESS_GROUP.0)
-            .spawn()?;
+            .spawn()
+            .map_err(|e| {
+                Error::LaunchSystem("process-create", e.raw_os_error().unwrap_or(0) as u32)
+            })?;
         let pid = child.id();
-        let process = Handle(HANDLE(child.as_raw_handle()));
+        let process = Handle(HANDLE(child.into_raw_handle()));
         struct SuspendedGuard(HANDLE);
         impl Drop for SuspendedGuard {
             fn drop(&mut self) {
@@ -325,7 +334,10 @@ pub mod win {
             }
         }
         let guard = SuspendedGuard(process.0);
-        let job = Handle(unsafe { CreateJobObjectW(None, None).map_err(|_| Error::Internal)? });
+        let job = Handle(unsafe {
+            CreateJobObjectW(None, None)
+                .map_err(|e| Error::LaunchSystem("job-create", e.code().0 as u32))?
+        });
         let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
         limits.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
@@ -336,16 +348,21 @@ pub mod win {
                 &limits as *const _ as *const c_void,
                 std::mem::size_of_val(&limits) as u32,
             )
-            .map_err(|_| Error::Internal)?;
-            if AssignProcessToJobObject(job.0, process.0).is_err() {
+            .map_err(|e| Error::LaunchSystem("job-limits", e.code().0 as u32))?;
+            if let Err(error) = AssignProcessToJobObject(job.0, process.0) {
                 let _ = TerminateProcess(process.0, 1);
-                return Err(Error::Internal);
+                return Err(Error::LaunchSystem("job-assign", error.code().0 as u32));
             }
         }
-        set_job_cpu(&job, cpu_percent)?;
+        // A new job has no CPU cap. Windows rejects a zero CpuRate on some
+        // systems; only configure rate control when a cap was requested.
+        if super::initial_cpu_cap_requested(cpu_percent) {
+            set_job_cpu(&job, cpu_percent)?;
+        }
         // Find the initial thread without reading client memory.
         let snapshot = Handle(unsafe {
-            CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0).map_err(|_| Error::Internal)?
+            CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0)
+                .map_err(|e| Error::LaunchSystem("thread-snapshot", e.code().0 as u32))?
         });
         let mut entry = THREADENTRY32 {
             dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
@@ -355,14 +372,16 @@ pub mod win {
         unsafe {
             if Thread32First(snapshot.0, &mut entry).is_ok() {
                 loop {
-                    if entry.th32OwnerProcessID == child.id() {
+                    if entry.th32OwnerProcessID == pid {
                         if let Ok(thread) =
                             OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID)
                         {
                             let thread = Handle(thread);
-                            let _ = ResumeThread(thread.0);
-                            resumed = true;
-                            break;
+                            if ResumeThread(thread.0) != u32::MAX {
+                                resumed = true;
+                                break;
+                            }
+                            return Err(Error::LaunchSystem("thread-resume", GetLastError().0));
                         }
                     }
                     if Thread32Next(snapshot.0, &mut entry).is_err() {
@@ -372,11 +391,10 @@ pub mod win {
             }
             if !resumed {
                 let _ = TerminateProcess(process.0, 1);
-                return Err(Error::Internal);
+                return Err(Error::LaunchStage("thread-not-found"));
             }
         }
         std::mem::forget(guard); // The initial thread is now running.
-        std::mem::forget(child); // The process handle remains owned by our RAII Handle.
         Ok((pid, job))
     }
     pub fn set_job_cpu(job: &Handle, percent: u32) -> Result<()> {
@@ -394,7 +412,7 @@ pub mod win {
                 std::mem::size_of_val(&info) as u32,
             )
         }
-        .map_err(|_| Error::Internal)
+        .map_err(|e| Error::LaunchSystem("cpu-rate", e.code().0 as u32))
     }
     pub fn process_birth(pid: u32) -> Result<u64> {
         let handle = process_handle(pid, PROCESS_QUERY_LIMITED_INFORMATION)?;
@@ -681,5 +699,15 @@ pub mod win {
             "data:image/jpeg;base64,{}",
             STANDARD.encode(output.into_inner())
         ))
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    #[test]
+    fn initial_job_cpu_cap_is_only_requested_for_nonzero_percent() {
+        assert!(!super::initial_cpu_cap_requested(0));
+        assert!(super::initial_cpu_cap_requested(1));
+        assert!(super::initial_cpu_cap_requested(100));
     }
 }

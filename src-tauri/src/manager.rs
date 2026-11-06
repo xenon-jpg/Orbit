@@ -17,6 +17,15 @@ use std::{
 use tauri::{Emitter, Manager as TauriManager};
 use tokio::sync::Mutex;
 
+#[cfg(windows)]
+fn launch_stage(error: Error, stage: &'static str) -> Error {
+    if matches!(error, Error::Internal) {
+        Error::LaunchStage(stage)
+    } else {
+        error
+    }
+}
+
 pub struct Runtime {
     pub tracked: TrackedClient,
     pub state: String,
@@ -576,13 +585,19 @@ impl Manager {
                 return Err(Error::ExistingClients);
             }
             {
-                let mut singleton = self.singleton.lock().map_err(|_| Error::Internal)?;
+                let mut singleton = self
+                    .singleton
+                    .lock()
+                    .map_err(|_| Error::LaunchStage("singleton-lock"))?;
                 if singleton.is_none() {
                     *singleton = Some(win::Singleton::acquire(!managed.is_empty())?);
                 }
             }
             if settings.protect_shared_login {
-                let mut files = self.shared_files.lock().map_err(|_| Error::Internal)?;
+                let mut files = self
+                    .shared_files
+                    .lock()
+                    .map_err(|_| Error::LaunchStage("shared-login-lock"))?;
                 if files.is_empty() {
                     use std::os::windows::fs::OpenOptionsExt;
                     let root =
@@ -597,7 +612,13 @@ impl Manager {
                                     .read(true)
                                     .write(true)
                                     .share_mode(0)
-                                    .open(path)?,
+                                    .open(path)
+                                    .map_err(|e| {
+                                        Error::LaunchSystem(
+                                            "shared-login-file",
+                                            e.raw_os_error().unwrap_or(0) as u32,
+                                        )
+                                    })?,
                             );
                         }
                     }
@@ -607,35 +628,41 @@ impl Manager {
             let signature_path = executable.clone();
             tokio::task::spawn_blocking(move || win::verify_signature(&signature_path))
                 .await
-                .map_err(|_| Error::Internal)??;
+                .map_err(|_| Error::LaunchStage("signature-task"))??;
             let client_dir = executable
                 .parent()
                 .ok_or(Error::NotInstalled)?
                 .to_path_buf();
             let _ = first;
-            crate::performance::frame_cap(profile.fps)?;
+            crate::performance::frame_cap(profile.fps).map_err(|e| launch_stage(e, "frame-cap"))?;
             let mut transaction = self.transaction.lock().await;
             if let Some(previous) = transaction.take() {
-                previous.restore()?;
+                previous
+                    .restore()
+                    .map_err(|e| launch_stage(e, "restore-settings"))?;
             }
-            *transaction = Some(crate::performance::Transaction::open(
-                &client_dir,
-                &state.data_dir,
-                &profile,
-            )?);
+            *transaction = Some(
+                crate::performance::Transaction::open(&client_dir, &state.data_dir, &profile)
+                    .map_err(|e| launch_stage(e, "write-client-settings"))?,
+            );
             drop(transaction);
             let count = self.active_count().await.max(1) as u32;
             if profile.fair_cpu {
                 profile.cpu_percent = (80 / count).clamp(5, 80);
             }
-            let ticket = state.roblox.ticket(account_id).await?;
+            let ticket = state
+                .roblox
+                .ticket(account_id)
+                .await
+                .map_err(|e| launch_stage(e, "authentication-ticket"))?;
             let tracker = rand::random::<u64>() % 9_000_000_000 + 1_000_000_000;
             let uri = target::launch_uri(
                 &ticket,
                 &target,
                 tracker,
                 chrono::Utc::now().timestamp_millis() as u128,
-            )?;
+            )
+            .map_err(|e| launch_stage(e, "launcher-uri"))?;
             drop(ticket);
             let (pid, job) = win::spawn_client(&uri, profile.cpu_percent)?;
             drop(uri);
@@ -692,7 +719,8 @@ impl Manager {
                     d.history.truncate(100);
                     Ok(())
                 })
-                .await?;
+                .await
+                .map_err(|e| launch_stage(e, "save-client-state"))?;
             Ok(account.user_id)
         }
         #[cfg(not(windows))]
